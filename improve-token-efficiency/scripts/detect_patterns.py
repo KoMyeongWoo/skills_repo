@@ -23,15 +23,15 @@ import glob
 import hashlib
 import json
 import os
+import re
 import sys
 from collections import defaultdict
 
-# Pricing (USD per 1M tokens). We price waste at Opus rates; if the actual
-# session was Sonnet, the dollar number is overstated by ~5x — but Sonnet
-# sessions are also cheap so the overall % impact is roughly right.
-OPUS_READ = 1.50
-OPUS_W1H = 30.00
-OPUS_OUT = 75.00
+# Pricing (USD per 1M tokens, claude-opus-5-5). We price waste at Opus rates;
+# Sonnet 5.5 is half that for writes/output and the same for cache reads.
+OPUS_READ = 0.20
+OPUS_W1H = 8.00
+OPUS_OUT = 20.00
 
 # Thresholds (from the user's spec)
 CONTEXT_HIGH_TOKENS = 100_000          # P1: "context exceeds 100k"
@@ -51,7 +51,8 @@ SUBAGENT_OVERHEAD_TOKENS = 3000        # P5: per-call system prompt + framing
 
 
 def encode_repo_path(p):
-    return os.path.abspath(os.path.expanduser(p)).replace("/", "-")
+    # Claude Code replaces every non-alphanumeric char with '-' (works for Windows paths too).
+    return re.sub(r"[^A-Za-z0-9]", "-", os.path.abspath(os.path.expanduser(p)))
 
 
 def stringify(obj):
@@ -94,7 +95,7 @@ def analyze_session(path):
     """Walk one session JSONL, build per-turn trajectories, run all 5 detectors."""
     sid = os.path.basename(path).replace(".jsonl", "")
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             records = [json.loads(line) for line in f if line.strip()]
     except Exception:
         return None
@@ -102,6 +103,7 @@ def analyze_session(path):
     # Index assistant turns and capture per-turn metrics in order.
     assistant_turns = []           # list of dicts: {idx, input, cache_read, cache_create, output, tool_uses}
     pending_tool_uses = {}         # tool_use_id → {name, input, turn_idx}
+    turn_by_msg_id = {}            # message.id → turn (one response is logged as one record per content block)
 
     # Map tool_use_id → result content (chars + token estimate). Walk records
     # in order; user records come AFTER the corresponding assistant tool_use.
@@ -111,6 +113,9 @@ def analyze_session(path):
         rtype = rec.get("type")
         if rtype == "assistant":
             msg = rec.get("message", {})
+            mid = msg.get("id")
+            merged = turn_by_msg_id.get(mid) if mid else None
+            turn_idx = merged["idx"] if merged else len(assistant_turns)
             usage = msg.get("usage", {})
             cw_detail = usage.get("cache_creation", {}) or {}
             cw_total = (
@@ -139,10 +144,14 @@ def analyze_session(path):
                         pending_tool_uses[tu["id"]] = {
                             "name": tu["name"],
                             "input": tu["input"],
-                            "turn_idx": len(assistant_turns),
+                            "turn_idx": turn_idx,
                         }
 
-            assistant_turns.append({
+            if merged:
+                # Same response, later content block: same usage, so only add its tool calls.
+                merged["tool_uses"].extend(tool_uses)
+                continue
+            turn = {
                 "idx": len(assistant_turns),
                 "input_tokens": inp,
                 "cache_read": cr,
@@ -150,7 +159,10 @@ def analyze_session(path):
                 "output_tokens": out,
                 "context_size": context_size,
                 "tool_uses": tool_uses,
-            })
+            }
+            assistant_turns.append(turn)
+            if mid:
+                turn_by_msg_id[mid] = turn
 
         elif rtype == "user":
             # Tool results come back as user messages with tool_result blocks.
@@ -456,7 +468,7 @@ def main():
         reverse=True,
     )
 
-    with open(args.out, "w") as f:
+    with open(args.out, "w", encoding="utf-8") as f:
         json.dump({"totals": totals, "sessions": sessions}, f, default=str, indent=2)
 
     print(f"[ok] wrote {args.out}")

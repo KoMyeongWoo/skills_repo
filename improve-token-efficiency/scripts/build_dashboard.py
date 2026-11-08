@@ -13,12 +13,12 @@ from collections import Counter
 # Must mirror analyze_sessions.py. Only used here for dollar-value estimates in
 # the improvement cards (not for primary cost calculation, which already lives
 # in the per-session `cost_usd`).
-OPUS_IN = 15.0
-OPUS_OUT = 75.0
-OPUS_W5 = 18.75
-OPUS_W1H = 30.0
-OPUS_READ = 1.50
-SONNET_RATIO = 5.0  # Opus / Sonnet blended multiplier
+OPUS_IN = 4.0     # claude-opus-5-5
+OPUS_OUT = 20.0
+OPUS_W5 = 5.0
+OPUS_W1H = 8.0
+OPUS_READ = 0.20
+SONNET = {"in": 2.0, "out": 10.0, "cw5": 2.5, "cw1h": 4.0, "cr": 0.20}  # claude-sonnet-5-5
 
 
 def compute_savings(totals, sessions):
@@ -28,8 +28,12 @@ def compute_savings(totals, sessions):
     actual achievable savings because items partially overlap (e.g. compaction
     and image management both reduce cache_read).
     """
-    # 1. Opus → Sonnet: assume 30% of total spend could run on Sonnet
-    save_model = totals["cost_usd"] * 0.30 * (1 - 1 / SONNET_RATIO)
+    # 1. Opus → Sonnet: assume 30% of the same tokens ran on Sonnet 5.5 instead.
+    #    Price ratio differs per bucket (in/out/write 2x, cache read 1x), so compute per bucket.
+    sonnet_cost = (totals["input_tokens"] * SONNET["in"] + totals["output_tokens"] * SONNET["out"]
+                   + totals["cache_create_5m"] * SONNET["cw5"] + totals["cache_create_1h"] * SONNET["cw1h"]
+                   + totals["cache_read"] * SONNET["cr"]) / 1e6
+    save_model = 0.30 * max(0.0, totals["cost_usd"] - sonnet_cost)
 
     # 2. /compact on top-14 sessions: cut cache_read by 30%
     top14 = sessions[:14]
@@ -264,8 +268,8 @@ def build_html(data, repo_name):
   <div class="card">
     <div class="imp">
       <div class="h"><div class="t">1. Opus → Sonnet 라우팅 (작업 난이도별)</div><div class="s">~${savings['model_routing']:.0f} (~{savings['model_routing']/totals['cost_usd']*100:.0f}%)</div></div>
-      <p>간단한 리팩터/리드/테스트 실행은 Sonnet으로 이관. <code>/fast</code> 토글 또는 <code>--model sonnet</code> 세션.</p>
-      <p><b>Why:</b> Opus 가격 = Sonnet × 5. 30%만 다운그레이드해도 큰 폭 절감.</p>
+      <p>간단한 리팩터/리드/테스트 실행은 Sonnet으로 이관. <code>/model sonnet</code> 또는 <code>--model sonnet</code> 세션. (<code>/fast</code>는 Opus 고속 모드로 오히려 2배 가격이다)</p>
+      <p><b>Why:</b> Opus 5.5 = Sonnet 5.5 × 2 (입력·출력·캐시 쓰기). 캐시 읽기는 둘 다 $0.20/M이라 캐시 읽기 비중이 큰 Claude Code에선 절감 폭이 작다.</p>
     </div>
     <div class="imp">
       <div class="h"><div class="t">2. 장시간 세션 <code>/compact</code> 적극 사용</div><div class="s">~${savings['compact']:.0f}</div></div>
@@ -279,7 +283,7 @@ def build_html(data, repo_name):
     </div>
     <div class="imp">
       <div class="h"><div class="t">4. Cache TTL 1h → 5m 전환</div><div class="s">~${savings['ttl']:.0f}</div></div>
-      <p>짧은 세션엔 1h 프리미엄($30/M) 불필요. 5m($18.75/M)로 충분. <code>ANTHROPIC_CACHE_TTL=5m</code> env 설정.</p>
+      <p>짧은 세션엔 1h 프리미엄($8/M) 불필요. 5m($5/M)로 충분. (설정 방법은 Claude Code 문서로 확인 필요. 원 스킬의 <code>ANTHROPIC_CACHE_TTL</code>은 검증되지 않음)</p>
       <p><b>Why:</b> 1h 프리미엄은 30분+ 세션에서만 회수. 단기 세션엔 순수 낭비.</p>
     </div>
     <div class="imp">
@@ -301,16 +305,16 @@ def build_html(data, repo_name):
   <h2>즉시 실행 권장</h2>
   <div class="card" style="font-size:14px; line-height:1.7;">
     <ol style="margin:0; padding-left:20px;">
-      <li><b>settings.json에 <code>env: {{"ANTHROPIC_CACHE_TTL":"5m"}}</code></b> — 단기 세션 즉시 감소.</li>
+      <li><b>단기 세션은 5m 캐시 TTL 검토</b> — 설정 방법은 Claude Code 문서 확인.</li>
       <li><b>CLAUDE.md에 "200k 토큰 초과 시 /compact" 명시</b> — 상위 세션은 모두 이 규칙 위반.</li>
-      <li><b>Sonnet 기본, Opus는 Plan/복잡 리팩터에 제한</b>.</li>
+      <li><b>단순 작업은 Sonnet 5.5 검토</b> — 단 캐시 읽기 가격은 같아 효과 제한적.</li>
       <li><b>이미지 업로드 후 즉시 /compact</b>.</li>
       <li><b>Grep/Glob 우선 탐색 규율</b>.</li>
     </ol>
   </div>
 
   <div class="footer">
-    가격 기준: 1M 토큰당 (입력 / 출력 / 캐시쓰기 5m / 캐시쓰기 1h / 캐시읽기) · Opus 4.x ($15 / $75 / $18.75 / $30 / $1.50) · Sonnet 4.x ($3 / $15 / $3.75 / $6 / $0.30) · Haiku 4.x ($0.80 / $4 / $1 / $1.60 / $0.08).
+    가격 기준: 1M 토큰당 (입력 / 출력 / 캐시쓰기 5m / 캐시쓰기 1h / 캐시읽기) · Opus 5.5 ($4 / $20 / $5 / $8 / $0.20) · Sonnet 5.5 ($2 / $10 / $2.50 / $4 / $0.20). 같은 응답이 블록마다 여러 줄로 기록되므로 usage는 message.id당 한 번만 집계.
   </div>
 
 <script>
@@ -407,7 +411,7 @@ def main():
         print(f"        run analyze_sessions.py first", file=sys.stderr)
         sys.exit(2)
 
-    with open(args.input) as f:
+    with open(args.input, encoding="utf-8") as f:
         data = json.load(f)
 
     if not data.get("sessions"):
@@ -419,7 +423,7 @@ def main():
     ) or "Claude Code sessions"
 
     html = build_html(data, repo_name)
-    with open(args.out, "w") as f:
+    with open(args.out, "w", encoding="utf-8") as f:
         f.write(html)
 
     print(f"[ok] wrote {args.out}")

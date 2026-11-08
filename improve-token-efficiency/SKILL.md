@@ -13,9 +13,10 @@ Claude Code 가 `~/.claude/projects/<encoded-repo-path>/*.jsonl` 에 남기는 �
 
 ### 1. 대상 레포 결정
 
-사용자가 경로를 명시했으면 그것을 쓴다. 아니면 현재 작업 디렉터리(`pwd`)를 기준으로 삼는다. 경로를 `-`, `/` 처리한 규칙으로 `~/.claude/projects/<encoded>/` 를 구성한다. 예:
+사용자가 경로를 명시했으면 그것을 쓴다. 아니면 현재 작업 디렉터리(`pwd`)를 기준으로 삼는다. 경로의 영숫자가 아닌 모든 문자(`/`, `\`, `:`, `_`, `.` 등)를 `-`로 바꾼 이름으로 `~/.claude/projects/<encoded>/` 를 구성한다. 예:
 
 - `/Users/jaeha/Projects/GrowthNote` → `-Users-jaeha-Projects-GrowthNote`
+- `C:\Users\User\Project\Stock_analyst` → `C--Users-User-Project-Stock-analyst`
 
 스크립트가 이 변환을 자동으로 한다. 사용자에게 확인할 필요 없다.
 
@@ -30,6 +31,8 @@ python3 ~/.claude/skills/improve-token-efficiency/scripts/analyze_sessions.py \
 - `--repo` 없으면 cwd. `--sessions-dir` 로 직접 지정도 가능.
 - 출력: `/tmp/session_analysis.json` (totals + per-session stats + scores).
 - 빈 세션(usage 기록 0)은 자동 제외한다.
+- 응답 하나가 내용 블록(thinking, text, tool_use)마다 한 줄씩, 같은 `usage`를 반복해 기록된다. 그래서 usage는 `message.id`당 한 번만 센다(줄마다 더하면 약 2.4배 과대 집계).
+- 로그는 UTF-8로 읽는다. 인코딩을 지정하지 않으면 한국어 Windows(cp949)에서 모든 줄이 디코딩에 실패해 전 세션이 usage 0이 된다.
 
 스크립트가 세션별로 다음을 계산한다:
 
@@ -46,7 +49,7 @@ python3 ~/.claude/skills/improve-token-efficiency/scripts/analyze_sessions.py \
 
 ### 3. 점수화 (Rubric)
 
-`scripts/analyze_sessions.py` 가 각 세션을 4개 지표로 0–100 점화하고 가중 합산한다. 아래 기준을 바꾸고 싶으면 `--weights` 플래그나 스크립트 내 상수 수정.
+`scripts/analyze_sessions.py` 가 각 세션을 4개 지표로 0–100 점화하고 가중 합산한다. 아래 기준을 바꾸고 싶으면 `score_session()` 안의 가중치 상수(`0.40` 등)를 수정한다. 플래그로 바꾸는 기능은 없다.
 
 | 지표 | 가중치 | 측정 |
 |---|---|---|
@@ -89,19 +92,23 @@ HTML을 연 뒤 Korean 으로 최상위 수치와 가장 큰 개선 3가지를 2
 
 | Model | Input | Output | Cache write 5m | Cache write 1h | Cache read |
 |---|---|---|---|---|---|
+| Opus 5.5 (`claude-opus-5-5`) | 4.0 | 20.0 | 5.0 | 8.0 | 0.20 |
+| Sonnet 5.5 (`claude-sonnet-5-5`) | 2.0 | 10.0 | 2.5 | 4.0 | 0.20 |
 | Opus 4.x (`claude-opus-4-6`, `claude-opus-4-7`) | 15.0 | 75.0 | 18.75 | 30.0 | 1.50 |
 | Sonnet 4.x (`claude-sonnet-4-6`) | 3.0 | 15.0 | 3.75 | 6.0 | 0.30 |
 | Haiku 4.x (`claude-haiku-4-5-*`) | 0.80 | 4.0 | 1.0 | 1.6 | 0.08 |
 | `<synthetic>` | 0 | 0 | 0 | 0 | 0 |
 
+캐시 쓰기는 입력 단가의 1.25배(5m), 2배(1h)다. `build_dashboard.py` 상단의 `OPUS_*`·`SONNET` 상수(비용 내역 차트와 개선안 산정용)도 Opus 5.5 / Sonnet 5.5 단가이므로 기본 모델이 바뀌면 함께 고친다.
+
 ## 개선안 산정 로직
 
 `build_dashboard.py` 가 6가지 휴리스틱으로 예상 절감을 계산한다. 보수적으로 단순 합산이 전체 비용의 40–50%를 넘으면 단일 카드에 "중복 고려 시 실제로는 30–40% 수준" 주석을 붙인다.
 
-1. **Opus → Sonnet 라우팅**: 전체의 30%를 Sonnet으로 이관한다고 가정 → `cost × 0.3 × (1 − 1/5)` 절감. Opus/Sonnet 비용비 약 5배.
+1. **Opus → Sonnet 라우팅**: 같은 토큰의 30%를 Sonnet 5.5로 돌린다고 가정 → `0.3 × (실제 비용 − 같은 토큰을 Sonnet 5.5 단가로 계산한 비용)` 절감. 입력·출력·캐시 쓰기는 2배 차이지만 캐시 읽기는 둘 다 $0.20라, 토큰 종류별로 따로 계산한다. (`/fast`는 Sonnet 전환이 아니라 Opus 고속 모드로 더 비싸다.)
 2. **장시간 세션 `/compact`**: 상위 14개 세션(Pareto 기준)의 `cache_read` 의 30% 감소 가정.
 3. **이미지 세션 관리**: 이미지 포함 세션에서 장당 ~40k 토큰이 세션 내내 유지된다고 보고, 이의 50%가 컴팩션으로 사라지는 경우.
-4. **Cache TTL 1h → 5m**: 전체 1h 캐시 쓰기의 40%가 5m 로 충분하다고 가정 → `× ($30 − $18.75) / $30` 절감.
+4. **Cache TTL 1h → 5m**: 전체 1h 캐시 쓰기의 40%가 5m 로 충분하다고 가정 → `cache_create_1h × 0.4 × ($8 − $5) / 1M` 절감. TTL 설정 방법은 Claude Code 문서로 확인한다(검증되지 않은 환경변수를 안내하지 않는다).
 5. **세션 scope 축소**: 상위 14개 외 세션의 `cache_read` 15% 감소 가정.
 6. **중복 Read 제거**: `redundant_reads × 3000토큰 × (cache write + 10 re-read)` 비용.
 
@@ -111,9 +118,9 @@ HTML을 연 뒤 Korean 으로 최상위 수치와 가장 큰 개선 3가지를 2
 
 - **세션 디렉터리가 없다**: 레포가 Claude Code 로 한 번도 열린 적 없는 경우. "분석할 세션 없음" 안내하고 종료.
 - **모든 세션이 빈 usage**: 아주 오래된 CLI 버전일 수 있음. 스크립트가 자동으로 걸러내고 남은 게 없으면 종료.
-- **가격 미등록 모델**: 기본값으로 Opus 가격 적용하고, 콘솔에 `[warn] unknown model: <id>, applying Opus default` 출력.
+- **가격 미등록 모델**: 기본값으로 Opus 5.5 가격 적용하고, 콘솔에 `[warn] unknown model: <id>, applying Opus default` 출력.
 - **Python 3.9+**: dataclass / walrus 사용 없음, 순수 stdlib 만 필요. pip install 불필요.
-- **Chart.js CDN 의존**: 오프라인 환경이면 `--inline-chartjs` 옵션으로 로컬 복사본 사용 가능 (스크립트가 지원).
+- **Chart.js CDN 의존**: HTML이 `cdn.jsdelivr.net`에서 Chart.js 4.4.0을 불러온다. 오프라인 환경이면 차트가 그려지지 않는다(로컬 복사본을 넣는 옵션은 없다).
 
 ## 품질 기준 (skill 자체에 대한)
 

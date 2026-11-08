@@ -14,6 +14,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import sys
 from collections import defaultdict
 
@@ -25,17 +26,21 @@ PRICING = {
     "claude-sonnet-4-6": {"in":  3.00, "out": 15.00, "cw5":  3.75, "cw1h":  6.00, "cr": 0.30},
     "claude-sonnet-4-5": {"in":  3.00, "out": 15.00, "cw5":  3.75, "cw1h":  6.00, "cr": 0.30},
     "claude-haiku-4-5":  {"in":  0.80, "out":  4.00, "cw5":  1.00, "cw1h":  1.60, "cr": 0.08},
+    "claude-opus-5-5":   {"in":  4.00, "out": 20.00, "cw5":  5.00, "cw1h":  8.00, "cr": 0.20},
+    "claude-sonnet-5-5": {"in":  2.00, "out": 10.00, "cw5":  2.50, "cw1h":  4.00, "cr": 0.20},
     "<synthetic>":       {"in":  0.00, "out":  0.00, "cw5":  0.00, "cw1h":  0.00, "cr": 0.00},
 }
 # Opus default for unknown models (conservative = higher estimate, so the
 # report doesn't silently under-report cost).
-DEFAULT_PRICE = PRICING["claude-opus-4-6"]
+DEFAULT_PRICE = PRICING["claude-opus-5-5"]
 
 
 def encode_repo_path(repo_path):
-    """Turn /Users/x/Projects/Foo into -Users-x-Projects-Foo."""
+    r"""Claude Code replaces every non-alphanumeric char with '-':
+    /Users/x/Projects/Foo -> -Users-x-Projects-Foo
+    C:\Users\x\My_Repo -> C--Users-x-My-Repo"""
     abs_path = os.path.abspath(os.path.expanduser(repo_path))
-    return abs_path.replace("/", "-")
+    return re.sub(r"[^A-Za-z0-9]", "-", abs_path)
 
 
 def resolve_sessions_dir(args):
@@ -78,9 +83,10 @@ def analyze_session(path):
         "image_count": 0,
         "compact_count": 0,
     }
+    seen_msg_ids = set()
 
     try:
-        with open(path, "r") as f:
+        with open(path, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -108,12 +114,16 @@ def analyze_session(path):
                                 stats["image_count"] += 1
 
                 elif rtype == "assistant":
-                    stats["num_assistant_msgs"] += 1
                     msg = rec.get("message", {})
+                    mid = msg.get("id")
+                    first_block = mid is None or mid not in seen_msg_ids
+                    seen_msg_ids.add(mid)
+                    if first_block:
+                        stats["num_assistant_msgs"] += 1
                     model = msg.get("model", "") or ""
                     if model:
                         stats["models"].add(model)
-                    usage = msg.get("usage", {})
+                    usage = (msg.get("usage", {}) or {}) if first_block else {}
                     price = price_for(model)
 
                     inp = usage.get("input_tokens", 0)
@@ -298,7 +308,7 @@ def main():
 
     results.sort(key=lambda r: r["cost_usd"], reverse=True)
 
-    with open(args.out, "w") as f:
+    with open(args.out, "w", encoding="utf-8") as f:
         json.dump({"totals": totals, "sessions": results}, f, default=str, indent=2)
 
     print(f"[ok] wrote {args.out}")

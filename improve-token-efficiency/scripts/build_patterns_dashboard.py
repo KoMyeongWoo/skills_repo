@@ -23,7 +23,7 @@ PATTERN_META = {
     "context_bloat": {
         "title": "1. 컨텍스트 창이 무한정 부풀어 오름",
         "rule": "컨텍스트 100k 토큰 초과가 연속 20+ turn 이어지고, 그 사이 50% 이상 감소(=compact)가 없음.",
-        "formula": "낭비 = Σ max(0, 컨텍스트 − 80k) × cache_read 단가 ($1.50/M).",
+        "formula": "낭비 = Σ max(0, 컨텍스트 − 80k) × cache_read 단가 ($0.20/M).",
         "fix_code": """# CLAUDE.md 에 명시
 누적 입력이 200k 를 넘으면 진행 전에 /compact 실행.
 주제가 바뀌면 새 세션 시작 — CLAUDE.md 와 MEMORY.md 가
@@ -46,7 +46,7 @@ psql -c 'SELECT count(*) FROM x'      # SELECT * 지양
     "poor_cache_util": {
         "title": "3. 프롬프트 캐시 활용 저조",
         "rule": "한 turn 의 cache 적중률 < 50% 이면서 컨텍스트 > 30k (= prompt prefix 가 흔들리는 중).",
-        "formula": "낭비 = cache_create × (쓰기 단가 − 읽기 단가) = × $28.50/M.",
+        "formula": "낭비 = cache_create × (쓰기 단가 − 읽기 단가) = × $7.80/M.",
         "fix_code": """# prefix 무효화의 흔한 원인
 - 세션 도중 CLAUDE.md 수정 → 그 아래 전부 무효화
 - system reminder 추가/변경 → cache miss
@@ -59,7 +59,7 @@ psql -c 'SELECT count(*) FROM x'      # SELECT * 지양
     "duplicate_tools": {
         "title": "4. 동일한 도구 호출이 그대로 반복됨",
         "rule": "SHA-256(tool_name, input) 가 동일한 호출 — 같은 호출을 또 함.",
-        "formula": "낭비 = 결과_토큰 × cache_write 단가 ($30/M, 결과가 컨텍스트에 재진입하므로).",
+        "formula": "낭비 = 결과_토큰 × cache_write 단가 ($8/M, 결과가 컨텍스트에 재진입하므로).",
         "fix_code": """# Read/Grep/Bash 를 다시 부르기 전에 자문
 - 이 답이 대화 위쪽에 이미 있지 않나?
 - 마지막 Read 이후 파일이 정말 바뀌었나?
@@ -73,7 +73,7 @@ psql -c 'SELECT count(*) FROM x'      # SELECT * 지양
     "subagent_overuse": {
         "title": "5. Task / 서브에이전트 과다 위임",
         "rule": "Agent 호출 5회 이상 + 평균 결과 ≤ 2k 토큰 (= 각 작업이 ≤3 turn 수준의 사소한 작업).",
-        "formula": "낭비 = 호출 수 × 서브에이전트당 약 3k 오버헤드 × write 단가 ($30/M).",
+        "formula": "낭비 = 호출 수 × 서브에이전트당 약 3k 오버헤드 × write 단가 ($8/M).",
         "fix_code": """# 서브에이전트 사용 기준
 - 인라인으로: 단일 파일 조회, 단순 Grep, "package.json 안 보기"
 - 서브에이전트로: 다단계 리서치, 병렬 작업, 대용량 컨텍스트 탐색
@@ -103,7 +103,7 @@ def build_html(data):
     kpi_html = f"""
     <div class="grid kpis">
       <div class="kpi"><div class="l">분석된 세션</div><div class="v">{totals['sessions_total']}</div><div class="s">{totals['sessions_with_any_pattern']}개에서 1개 이상 패턴 검출</div></div>
-      <div class="kpi"><div class="l">예상 누적 낭비</div><div class="v bad">{fmt_usd(totals['total_waste_usd'])}</div><div class="s">5개 검출기 합산 (Opus 가격 기준)</div></div>
+      <div class="kpi"><div class="l">예상 누적 낭비</div><div class="v bad">{fmt_usd(totals['total_waste_usd'])}</div><div class="s">5개 검출기 합산 (Opus 5.5 가격 기준)</div></div>
       <div class="kpi"><div class="l">최대 단일 패턴</div><div class="v warn">{fmt_usd(max(p['total_waste_usd'] for p in pt.values()))}</div><div class="s">{PATTERN_KO_NAME[max(pt, key=lambda k: pt[k]['total_waste_usd'])]}</div></div>
       <div class="kpi"><div class="l">활성 패턴 수</div><div class="v">{sum(1 for p in pt.values() if p['affected_sessions']>0)} / 5</div><div class="s">검출된 비효율 종류</div></div>
     </div>
@@ -276,7 +276,7 @@ def build_html(data):
 
   <div class="footer">
     위 탐지 규칙과 계산식은 결정론적입니다 — 같은 입력에 대해 항상 같은 낭비액이 산출됩니다.<br>
-    가격 기준: Opus 4.x (1M 토큰당 read $1.50 / write 1h $30 / output $75).
+    가격 기준: Opus 5.5 (1M 토큰당 read $0.20 / write 1h $8 / output $20).
   </div>
 
 <script>
@@ -322,11 +322,11 @@ def main():
         print(f"[error] missing {args.input}. Run detect_patterns.py first.", file=sys.stderr)
         sys.exit(2)
 
-    with open(args.input) as f:
+    with open(args.input, encoding="utf-8") as f:
         data = json.load(f)
 
     html = build_html(data)
-    with open(args.out, "w") as f:
+    with open(args.out, "w", encoding="utf-8") as f:
         f.write(html)
     print(f"[ok] wrote {args.out}")
     print(f"     open: open {args.out}")
